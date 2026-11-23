@@ -682,7 +682,7 @@ fun NeuralCore3D(
     var pulseCount by remember { mutableIntStateOf(0) }
 
     WebsiteStyle3DStage(
-        badgeText = if (isThinking) "AI Sana Active · Thinking..." else "AI Sana Companion · Taps: $pulseCount",
+        badgeText = if (isThinking) "AI Sana Active" else "AI Sana Companion · Taps: $pulseCount",
         accent = if (isThinking) EmeraldSuccess else ElectricCyan,
         testTag = "copilot_3d_neural_core",
         height = 176.dp,

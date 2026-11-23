@@ -79,7 +79,7 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             generationConfig = generationConfig {
                 temperature = 0.45f
                 topP = 0.9f
-                maxOutputTokens = 2048
+                maxOutputTokens = 3072
                 // Keep Deep mode responsive so extended reasoning does not stall TTFT past timeout.
                 thinkingConfig = thinkingConfig {
                     thinkingLevel = ThinkingLevel.LOW
@@ -98,7 +98,7 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             generationConfig = generationConfig {
                 temperature = 0.55f
                 topP = 0.9f
-                maxOutputTokens = 1200
+                maxOutputTokens = 1800
             },
             requestOptions = fastRequestOptions,
             systemInstruction = content {
@@ -121,17 +121,33 @@ class AiCopilotRepository(private val appContext: Context? = null) {
         )
     )
 
+    private val structuredPrimaryRequestOptions = RequestOptions(30_000L)
+    private val structuredFallbackRequestOptions = RequestOptions(45_000L)
+
     private val onePagerModel by lazy {
         Firebase.ai.generativeModel(
             modelName = DEEP_MODEL_NAME,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = onePagerSchema
+                maxOutputTokens = 1200
                 thinkingConfig = thinkingConfig {
                     thinkingLevel = ThinkingLevel.LOW
                 }
             },
-            requestOptions = deepRequestOptions
+            requestOptions = structuredPrimaryRequestOptions
+        )
+    }
+
+    private val fastOnePagerModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = FAST_MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = onePagerSchema
+                maxOutputTokens = 1200
+            },
+            requestOptions = structuredFallbackRequestOptions
         )
     }
 
@@ -160,11 +176,24 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = pitchDeckSchema
+                maxOutputTokens = 1400
                 thinkingConfig = thinkingConfig {
                     thinkingLevel = ThinkingLevel.LOW
                 }
             },
-            requestOptions = deepRequestOptions
+            requestOptions = structuredPrimaryRequestOptions
+        )
+    }
+
+    private val fastPitchDeckModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = FAST_MODEL_NAME,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = pitchDeckSchema
+                maxOutputTokens = 1400
+            },
+            requestOptions = structuredFallbackRequestOptions
         )
     }
 
@@ -252,10 +281,11 @@ class AiCopilotRepository(private val appContext: Context? = null) {
         catalogContext: List<BackendInnovation> = emptyList(),
         talentContext: List<BackendTalent> = emptyList(),
         directorySummaryLines: List<String> = emptyList(),
+        workbookSearchResult: WorkbookSearchResult? = null,
         onPhaseChange: (AiRequestPhase) -> Unit = {},
         onModelResolved: (route: String, modelName: String, switchedFromModel: String?, fallbackReason: AiFailureCategory?) -> Unit = { _, _, _, _ -> }
     ): Flow<String> {
-        val recentHistory = SanaPromptEngine.filterUsableHistory(history, maxTurns = 12)
+        val recentHistory = SanaPromptEngine.filterUsableHistory(history, maxTurns = 16)
             .map { msg ->
                 content(role = if (msg.isAssistant) "model" else "user") {
                     text(msg.content.removeSuffix("\n\n*(Generation stopped)*"))
@@ -268,7 +298,8 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             catalogContext = catalogContext,
             talentContext = talentContext,
             directorySummaryLines = directorySummaryLines,
-            hasAttachedImage = attachedImage != null
+            hasAttachedImage = attachedImage != null,
+            workbookSearchResult = workbookSearchResult
         )
 
         val currentPromptText = buildString {
@@ -617,9 +648,31 @@ class AiCopilotRepository(private val appContext: Context? = null) {
         } else if (preflight.abortCategory == AiFailureCategory.APP_CHECK_OR_AUTH) {
             Log.w(TAG, "App Check preflight non-blocking for pitch deck ($appCheckStatus); attempting Firebase AI directly.")
         }
-            Log.d(TAG, "Generating pitch deck [model=$DEEP_MODEL_NAME, appCheck=$appCheckStatus]")
-            val response = withTimeout(AI_TIMEOUT_MS) {
-                pitchDeckModel.generateContent(prompt)
+            Log.d(TAG, "Generating pitch deck [primary=$DEEP_MODEL_NAME, fallback=$FAST_MODEL_NAME, appCheck=$appCheckStatus]")
+            val response = try {
+                withTimeout(22_000L) {
+                    pitchDeckModel.generateContent(prompt)
+                }
+            } catch (primaryErr: CancellationException) {
+                if (primaryErr !is TimeoutCancellationException) throw primaryErr
+                Log.w(TAG, "Primary pitch deck model timed out; falling back to $FAST_MODEL_NAME", primaryErr)
+                withTimeout(45_000L) {
+                    fastPitchDeckModel.generateContent(prompt)
+                }
+            } catch (primaryErr: Exception) {
+                val category = SanaPromptEngine.classifyAiError(primaryErr)
+                val msgLower = primaryErr.message.orEmpty().lowercase()
+                val shouldFallback = category in setOf(
+                    AiFailureCategory.TIMEOUT,
+                    AiFailureCategory.PROVIDER_OVERLOAD,
+                    AiFailureCategory.QUOTA_OR_RATE_LIMIT,
+                    AiFailureCategory.MODEL_UNAVAILABLE
+                ) || msgLower.contains("allotted time") || msgLower.contains("timeout") || msgLower.contains("deadline")
+                if (!shouldFallback) throw primaryErr
+                Log.w(TAG, "Primary pitch deck model failed ($category); falling back to $FAST_MODEL_NAME", primaryErr)
+                withTimeout(45_000L) {
+                    fastPitchDeckModel.generateContent(prompt)
+                }
             }
             val jsonText = response.text ?: throw IllegalStateException("Empty structured response from AI Sana.")
             val root = JSONObject(jsonText)
@@ -643,8 +696,8 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             }
             PitchDeckResult(innovationTitle = innovation.title, slides = slides)
         } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Pitch deck generation timed out [model=$DEEP_MODEL_NAME]", e)
-            throw IllegalStateException("Pitch deck generation timed out ($DEEP_MODEL_NAME). Please check your connection and tap Retry.", e)
+            Log.e(TAG, "Pitch deck generation timed out on both $DEEP_MODEL_NAME and $FAST_MODEL_NAME", e)
+            throw IllegalStateException("Pitch deck generation timed out. Please check your connection and tap Retry.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -753,8 +806,28 @@ class AiCopilotRepository(private val appContext: Context? = null) {
         """.trimIndent()
 
         return try {
-            val response = withTimeout(AI_TIMEOUT_MS) {
-                onePagerModel.generateContent(prompt)
+            val response = try {
+                withTimeout(22_000L) {
+                    onePagerModel.generateContent(prompt)
+                }
+            } catch (primaryErr: CancellationException) {
+                if (primaryErr !is TimeoutCancellationException) throw primaryErr
+                Log.w(TAG, "Primary one-pager model timed out; falling back to $FAST_MODEL_NAME", primaryErr)
+                withTimeout(45_000L) {
+                    fastOnePagerModel.generateContent(prompt)
+                }
+            } catch (primaryErr: Exception) {
+                val msgLower = primaryErr.message.orEmpty().lowercase()
+                val category = SanaPromptEngine.classifyAiError(primaryErr)
+                if (category !in setOf(AiFailureCategory.TIMEOUT, AiFailureCategory.PROVIDER_OVERLOAD, AiFailureCategory.QUOTA_OR_RATE_LIMIT) &&
+                    !msgLower.contains("allotted time") && !msgLower.contains("timeout")
+                ) {
+                    throw primaryErr
+                }
+                Log.w(TAG, "Primary one-pager model failed ($category); falling back to $FAST_MODEL_NAME", primaryErr)
+                withTimeout(45_000L) {
+                    fastOnePagerModel.generateContent(prompt)
+                }
             }
             val jsonText = response.text ?: throw IllegalStateException("Empty structured response from AI Sana.")
             val json = JSONObject(jsonText)
@@ -773,7 +846,7 @@ class AiCopilotRepository(private val appContext: Context? = null) {
             )
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Investor One-Pager timed out", e)
-            throw IllegalStateException("One-Pager generation timed out after 60 seconds.")
+            throw IllegalStateException("One-Pager generation timed out. Please try again.")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

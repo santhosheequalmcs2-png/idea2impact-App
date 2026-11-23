@@ -13,7 +13,9 @@ import com.example.data.local.SavedProfileEntity
 import com.example.data.model.AiFailureCategory
 import com.example.data.model.AiRequestPhase
 import com.example.data.model.AiStatusUiState
+import com.example.data.model.AuthSyncStatus
 import com.example.data.model.AuthUser
+import com.example.data.model.UnifiedAuthSessionState
 import com.example.data.model.BackendComment
 import com.example.data.model.BackendInnovation
 import com.example.data.model.BackendTalent
@@ -65,6 +67,9 @@ import com.example.data.repository.IdeaRepository
 import com.example.data.repository.MessagingRepository
 import com.example.data.repository.PortfolioRepository
 import com.example.data.repository.SanaPromptEngine
+import com.example.data.repository.StartupWorkbookRepository
+import com.example.data.repository.WorkbookAccessStatus
+import com.example.data.repository.WorkbookSearchResult
 import com.example.util.FirebaseDiagnosticsReport
 import com.example.util.NetworkDiagnosticManager
 import com.example.util.NetworkDiagnosticState
@@ -88,6 +93,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -107,7 +113,8 @@ class AppViewModel(
     val networkDiagnosticManager: NetworkDiagnosticManager = NetworkDiagnosticManager.getInstance(appContext),
     private val portfolioRepository: PortfolioRepository? = null,
     private val messagingRepository: MessagingRepository? = null,
-    private val collaborationRepository: CollaborationRepository? = null
+    private val collaborationRepository: CollaborationRepository? = null,
+    private val startupWorkbookRepository: StartupWorkbookRepository? = appContext?.let { StartupWorkbookRepository(it) }
 ) : ViewModel() {
 
     val isDarkTheme: StateFlow<Boolean> = themePreferences.isDarkTheme
@@ -120,6 +127,9 @@ class AppViewModel(
 
     private val _currentUser = MutableStateFlow<AuthUser?>(null)
     val currentUser: StateFlow<AuthUser?> = _currentUser.asStateFlow()
+
+    private val _authSessionState = MutableStateFlow(UnifiedAuthSessionState())
+    val authSessionState: StateFlow<UnifiedAuthSessionState> = _authSessionState.asStateFlow()
 
     private val _firebaseUid = MutableStateFlow<String?>(runCatching { Firebase.auth.currentUser?.uid }.getOrNull())
     val firebaseUid: StateFlow<String?> = _firebaseUid.asStateFlow()
@@ -628,29 +638,47 @@ class AppViewModel(
         loadTalents()
         loadCategories()
         viewModelScope.launch {
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
             if (repository.hasSavedToken()) {
                 runCatching { repository.fetchCurrentUser() }
                     .onSuccess { user ->
-                        _currentUser.value = user ?: Firebase.auth.currentUser?.toAuthUser()
-                        if (_currentUser.value != null) loadDashboardStats()
+                        val resolved = user ?: fbUser?.toAuthUser()
+                        _currentUser.value = resolved
+                        if (resolved != null) {
+                            loadDashboardStats()
+                            if (fbUser == null && user != null) {
+                                syncBackendUserToFirebase(user, preIssuedCustomToken = null)
+                            } else {
+                                _firebaseUid.value = fbUser?.uid
+                                updateAuthSessionState(
+                                    status = if (fbUser != null && repository.hasSavedToken()) {
+                                        AuthSyncStatus.SYNCED
+                                    } else {
+                                        AuthSyncStatus.BACKEND_DEGRADED
+                                    }
+                                )
+                            }
+                        } else {
+                            updateAuthSessionState(AuthSyncStatus.SIGNED_OUT)
+                        }
                     }
                     .onFailure { e ->
                         if (e is CancellationException) throw e
                         Log.w(TAG, "Deferred profile refresh skipped: ${e.message}")
-                        if (_currentUser.value == null) {
-                            Firebase.auth.currentUser?.let { fbUser ->
-                                _firebaseUid.value = fbUser.uid
-                                _currentUser.value = fbUser.toAuthUser()
-                                loadDashboardStats()
-                            }
+                        if (_currentUser.value == null && fbUser != null) {
+                            _firebaseUid.value = fbUser.uid
+                            _currentUser.value = fbUser.toAuthUser()
+                            loadDashboardStats()
+                            syncFirebaseUserToBackend(fbUser, isAutoSignIn = true)
                         }
                     }
+            } else if (fbUser != null) {
+                _firebaseUid.value = fbUser.uid
+                _currentUser.value = fbUser.toAuthUser()
+                loadDashboardStats()
+                syncFirebaseUserToBackend(fbUser, isAutoSignIn = true)
             } else {
-                Firebase.auth.currentUser?.let { fbUser ->
-                    _firebaseUid.value = fbUser.uid
-                    _currentUser.value = fbUser.toAuthUser()
-                    loadDashboardStats()
-                }
+                updateAuthSessionState(AuthSyncStatus.SIGNED_OUT)
             }
         }
     }
@@ -774,12 +802,16 @@ class AppViewModel(
             _isAuthBusy.value = true
             _authError.value = null
             try {
-                val user = repository.login(email, password)
+                val exchange = repository.loginWithExchange(email, password)
+                val user = exchange.user.copy(
+                    authProviders = (exchange.user.authProviders + "password").distinct()
+                )
                 _currentUser.value = user
                 _showAuthModal.value = false
                 _snackbarMessage.value = "Welcome back, ${user.name}!"
                 loadDashboardStats()
                 loadInnovations()
+                syncBackendUserToFirebase(user, preIssuedCustomToken = exchange.firebaseCustomToken)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -799,12 +831,16 @@ class AppViewModel(
             _isAuthBusy.value = true
             _authError.value = null
             try {
-                val user = repository.register(name, email, password)
+                val exchange = repository.registerWithExchange(name, email, password)
+                val user = exchange.user.copy(
+                    authProviders = (exchange.user.authProviders + "password").distinct()
+                )
                 _currentUser.value = user
                 _showAuthModal.value = false
                 _snackbarMessage.value = "Account created! Welcome, ${user.name}."
                 loadDashboardStats()
                 loadInnovations()
+                syncBackendUserToFirebase(user, preIssuedCustomToken = exchange.firebaseCustomToken)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -820,7 +856,7 @@ class AppViewModel(
     }
 
     fun onGoogleAuthSuccess(isAutoSignIn: Boolean = false) {
-        val fbUser = Firebase.auth.currentUser ?: return
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull() ?: return
         val authUser = fbUser.toAuthUser()
         _firebaseUid.value = fbUser.uid
         _currentUser.value = authUser
@@ -830,25 +866,162 @@ class AppViewModel(
             _snackbarMessage.value = "Signed in with Google as ${authUser.name}!"
         }
         viewModelScope.launch {
-            runCatching {
-                ideaRepository?.ensureUserAndSeedCatalog(
-                    displayName = fbUser.displayName,
-                    email = fbUser.email,
-                    photoUrl = fbUser.photoUrl?.toString()
-                )
-            }.onFailure { e ->
-                if (e is CancellationException) throw e
-                Log.w(TAG, "Firestore user bootstrap skipped/deferred: ${e.message}")
-            }
-            runCatching {
-                messagingRepository?.updateMyPresence(
-                    online = true,
-                    displayName = authUser.name,
-                    role = myFirestoreProfile.value?.role ?: authUser.role
-                )
-            }
+            bootstrapFirestoreForCurrentUser(fbUser, authUser)
+            syncFirebaseUserToBackend(fbUser, isAutoSignIn = isAutoSignIn)
         }
         loadDashboardStats()
+    }
+
+    fun retryUnifiedAuthSync() {
+        viewModelScope.launch {
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+            when {
+                fbUser != null && !repository.hasSavedToken() -> {
+                    syncFirebaseUserToBackend(fbUser, isAutoSignIn = false)
+                }
+                repository.hasSavedToken() && fbUser == null -> {
+                    val user = _currentUser.value ?: runCatching { repository.fetchCurrentUser() }.getOrNull()
+                    if (user != null) {
+                        _currentUser.value = user
+                        syncBackendUserToFirebase(user, preIssuedCustomToken = null)
+                    }
+                }
+                fbUser != null && repository.hasSavedToken() -> {
+                    syncFirebaseUserToBackend(fbUser, isAutoSignIn = true)
+                }
+            }
+        }
+    }
+
+    private suspend fun bootstrapFirestoreForCurrentUser(fbUser: FirebaseUser, authUser: AuthUser) {
+        runCatching {
+            ideaRepository?.ensureUserAndSeedCatalog(
+                displayName = fbUser.displayName ?: authUser.name,
+                email = fbUser.email ?: authUser.email,
+                photoUrl = fbUser.photoUrl?.toString() ?: authUser.avatarUrl
+            )
+        }.onFailure { e ->
+            if (e is CancellationException) throw e
+            Log.w(TAG, "Firestore user bootstrap skipped/deferred: ${e.message}")
+        }
+        runCatching {
+            messagingRepository?.updateMyPresence(
+                online = true,
+                displayName = authUser.name,
+                role = myFirestoreProfile.value?.role ?: authUser.role
+            )
+        }
+    }
+
+    private suspend fun syncFirebaseUserToBackend(fbUser: FirebaseUser, isAutoSignIn: Boolean) {
+        updateAuthSessionState(
+            status = AuthSyncStatus.SYNCING,
+            notice = "Syncing marketplace account..."
+        )
+        try {
+            val idToken = fbUser.getIdToken(false).await().token
+            if (idToken.isNullOrBlank()) {
+                updateAuthSessionState(
+                    status = AuthSyncStatus.BACKEND_DEGRADED,
+                    notice = "Cloud workspace active · Marketplace session token unavailable."
+                )
+                return
+            }
+            val exchange = repository.exchangeFirebaseIdToken(idToken)
+            val mergedProviders = (exchange.user.authProviders + "google").distinct()
+            val canonicalUser = exchange.user.copy(
+                name = exchange.user.name.ifBlank { fbUser.displayName ?: "Innovator" },
+                email = exchange.user.email.ifBlank { fbUser.email.orEmpty() },
+                avatarUrl = exchange.user.avatarUrl ?: fbUser.photoUrl?.toString(),
+                firebaseUid = exchange.user.firebaseUid ?: fbUser.uid,
+                authProviders = mergedProviders,
+                emailVerified = exchange.user.emailVerified || fbUser.isEmailVerified
+            )
+            _currentUser.value = canonicalUser
+            updateAuthSessionState(status = AuthSyncStatus.SYNCED, notice = null)
+            if (exchange.accountLinked && !isAutoSignIn) {
+                _snackbarMessage.value = "Google account linked to your existing IDEA2IMPACT profile!"
+            }
+            loadDashboardStats()
+            loadInnovations()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Firebase-to-Express token exchange deferred: ${SanaPromptEngine.redactSensitiveInfo(e.message.orEmpty())}")
+            updateAuthSessionState(
+                status = AuthSyncStatus.BACKEND_DEGRADED,
+                notice = "Cloud workspace active · Marketplace sync pending"
+            )
+        }
+    }
+
+    private suspend fun syncBackendUserToFirebase(user: AuthUser, preIssuedCustomToken: String?) {
+        val existingFb = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (existingFb != null && (user.firebaseUid == null || existingFb.uid == user.firebaseUid)) {
+            _firebaseUid.value = existingFb.uid
+            updateAuthSessionState(status = AuthSyncStatus.SYNCED, notice = null)
+            return
+        }
+        updateAuthSessionState(
+            status = AuthSyncStatus.SYNCING,
+            notice = "Connecting real-time cloud workspace..."
+        )
+        try {
+            val customToken = preIssuedCustomToken?.takeIf { it.isNotBlank() }
+                ?: repository.requestFirebaseCustomToken()
+            if (customToken.isNullOrBlank()) {
+                updateAuthSessionState(
+                    status = AuthSyncStatus.FIREBASE_DEGRADED,
+                    notice = "Marketplace session active · Cloud sync pending"
+                )
+                return
+            }
+            val authResult = Firebase.auth.signInWithCustomToken(customToken).await()
+            val fbUser = authResult.user
+            if (fbUser != null) {
+                _firebaseUid.value = fbUser.uid
+                _currentUser.value = user.copy(firebaseUid = fbUser.uid)
+                bootstrapFirestoreForCurrentUser(fbUser, user)
+                updateAuthSessionState(status = AuthSyncStatus.SYNCED, notice = null)
+            } else {
+                updateAuthSessionState(
+                    status = AuthSyncStatus.FIREBASE_DEGRADED,
+                    notice = "Marketplace session active · Cloud sync pending"
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Express-to-Firebase custom token sync deferred: ${SanaPromptEngine.redactSensitiveInfo(e.message.orEmpty())}")
+            updateAuthSessionState(
+                status = AuthSyncStatus.FIREBASE_DEGRADED,
+                notice = "Marketplace session active · Cloud sync pending"
+            )
+        }
+    }
+
+    private fun updateAuthSessionState(status: AuthSyncStatus, notice: String? = null) {
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        val hasJwt = repository.hasSavedToken()
+        val providers = buildSet {
+            _currentUser.value?.authProviders?.forEach { add(it.lowercase()) }
+            fbUser?.providerData?.forEach { info ->
+                when (info.providerId) {
+                    "google.com" -> add("google")
+                    "password" -> add("password")
+                }
+            }
+            if (hasJwt && isEmpty()) add("password")
+            if (fbUser != null && isEmpty()) add("google")
+        }.toList()
+
+        _authSessionState.value = UnifiedAuthSessionState(
+            syncStatus = status,
+            isFirebaseSignedIn = fbUser != null,
+            isBackendJwtActive = hasJwt,
+            linkedProviders = providers,
+            statusNotice = notice
+        )
     }
 
     fun logout() {
@@ -865,6 +1038,7 @@ class AppViewModel(
         runCatching { Firebase.auth.signOut() }
         _firebaseUid.value = null
         _currentUser.value = null
+        _authSessionState.value = UnifiedAuthSessionState(syncStatus = AuthSyncStatus.SIGNED_OUT)
         _activeConversationId.value = null
         _activeProjectId.value = null
         _activeTaskId.value = null
@@ -887,7 +1061,10 @@ class AppViewModel(
             role = "Creator",
             headline = "Google Account · IDEA2IMPACT",
             avatarUrl = photoUrl?.toString(),
-            verified = isEmailVerified
+            verified = isEmailVerified,
+            firebaseUid = uid,
+            authProviders = listOf("google"),
+            emailVerified = isEmailVerified
         )
     }
 
@@ -1220,10 +1397,13 @@ class AppViewModel(
         amount: String,
         message: String,
         contactInfo: String,
-        onSuccess: () -> Unit
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit = {}
     ) {
         if (!isUserSignedIn()) {
-            _snackbarMessage.value = "Sign in to submit a collaboration proposal."
+            val msg = "Sign in to submit a collaboration proposal."
+            _snackbarMessage.value = msg
+            onError(msg)
             openAuthModal()
             return
         }
@@ -1270,9 +1450,13 @@ class AppViewModel(
                 throw e
             } catch (e: BackendApiException) {
                 if (e.code == 401) openAuthModal()
-                _snackbarMessage.value = e.message
+                val errMsg = e.message ?: "Failed to submit proposal."
+                _snackbarMessage.value = errMsg
+                onError(errMsg)
             } catch (e: Exception) {
-                _snackbarMessage.value = e.localizedMessage ?: "Failed to submit proposal."
+                val errMsg = e.localizedMessage ?: "Failed to submit proposal."
+                _snackbarMessage.value = errMsg
+                onError(errMsg)
             } finally {
                 _isActionBusy.value = false
             }
@@ -1763,6 +1947,24 @@ class AppViewModel(
                 }
             }
             try {
+                val lowerPrompt = trimmed.lowercase()
+                val needsWorkbookSearch = SanaPromptEngine.isIdeaSubmissionOrEvaluation(trimmed) ||
+                    lowerPrompt.contains("workbook") ||
+                    lowerPrompt.contains("dataset")
+                val workbookResult = if (needsWorkbookSearch) {
+                    startupWorkbookRepository?.searchAsync(
+                        prompt = trimmed,
+                        activeInnovation = targetInnovation,
+                        limit = 5
+                    ) ?: WorkbookSearchResult(
+                        status = WorkbookAccessStatus.UNAVAILABLE,
+                        unavailabilityReason = "Reference workbook repository is not initialized in this session.",
+                        querySummary = trimmed.take(160)
+                    )
+                } else {
+                    null
+                }
+
                 if (isCustomRoute) {
                     val contextPayload = SanaPromptEngine.buildCustomKeyContextString(
                         prompt = trimmed,
@@ -1771,7 +1973,8 @@ class AppViewModel(
                         catalogContext = catalogSnapshot,
                         talentContext = talentSnapshot,
                         directorySummaryLines = directoryLines,
-                        isFastMode = _useFastAiModel.value
+                        isFastMode = _useFastAiModel.value,
+                        workbookSearchResult = workbookResult
                     )
                     updateAiStatus(AiRequestPhase.THINKING)
                     val reply = repository.sendAiChat(
@@ -1802,6 +2005,7 @@ class AppViewModel(
                         catalogContext = catalogSnapshot,
                         talentContext = talentSnapshot,
                         directorySummaryLines = directoryLines,
+                        workbookSearchResult = workbookResult,
                         onPhaseChange = { phase -> updateAiStatus(phase) },
                         onModelResolved = { route, modelName, switchedFromModel, fallbackReason ->
                             val isFastResolved = route == "fast_flash_lite"
@@ -2929,9 +3133,9 @@ class AppViewModel(
             id = "welcome",
             isAssistant = true,
             content = "### Meet AI Sana\n" +
-                "Your conversational assistant and startup/idea advisor inside IDEA2IMPACT. Ask any question, share an idea for honest feedback, or attach a prototype image.\n\n" +
-                "- **Idea Feedback & Validation:** Strengths, risks, open questions, practical tests, and an early 1–10 assessment.\n" +
-                "- **Technical & Venture Advice:** Architecture planning, IP considerations, or browsing verified organizations and collaborators.",
+                "Your conversational assistant and startup/idea advisor inside IDEA2IMPACT. Ask any question, share a startup idea for honest feedback, or attach a prototype image.\n\n" +
+                "- **1,600-Concept Workbook Comparison:** Share your startup idea and I will summarize it, search the bundled India Startup Ideas reference workbooks (1,600 concept briefs — one comparison source, not an exhaustive company list), highlight similarities and differences, and suggest tailored differentiation angles with low-cost tests.\n" +
+                "- **Idea Validation & Venture Advice:** Honest early assessment, risks and open questions, architecture planning, and browsing verified organizations and collaborators.",
             timestamp = SecurityCryptoUtils.formatTime()
         )
     }

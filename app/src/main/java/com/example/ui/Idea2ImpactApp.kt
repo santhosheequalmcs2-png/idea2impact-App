@@ -13,10 +13,12 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -24,11 +26,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,11 +61,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
@@ -81,12 +87,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -120,6 +128,7 @@ import com.example.data.repository.EcosystemRepository
 import com.example.data.repository.IdeaRepository
 import com.example.data.repository.MessagingRepository
 import com.example.data.repository.PortfolioRepository
+import com.example.data.repository.StartupWorkbookRepository
 import com.example.ui.auth.attemptAutoSignIn
 import com.example.ui.auth.signOutWithCredentialClear
 import com.example.ui.components.BackendAuthModal
@@ -142,6 +151,9 @@ import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.PricingScreen
 import com.example.ui.screens.TalentScreen
 import com.example.ui.theme.Idea2ImpactTheme
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import kotlinx.coroutines.tasks.await
 import com.example.ui.viewmodel.AppViewModel
 import com.example.util.LocalHapticFeedbackManager
 import com.example.util.StartupSoundPlayer
@@ -208,7 +220,12 @@ fun Idea2ImpactApp() {
                 val repository = BackendRepository(
                     tokenManager = tokenManager,
                     innovationDao = database.innovationDao(),
-                    searchHistoryDao = database.searchHistoryDao()
+                    searchHistoryDao = database.searchHistoryDao(),
+                    firebaseIdTokenProvider = { forceRefresh ->
+                        runCatching {
+                            Firebase.auth.currentUser?.getIdToken(forceRefresh)?.await()?.token
+                        }.getOrNull()
+                    }
                 )
                 val portfolioRepository = PortfolioRepository(
                     ideaPortfolioDao = database.ideaPortfolioDao(),
@@ -227,7 +244,8 @@ fun Idea2ImpactApp() {
                     appContext = app.applicationContext,
                     portfolioRepository = portfolioRepository,
                     messagingRepository = messagingRepository,
-                    collaborationRepository = collaborationRepository
+                    collaborationRepository = collaborationRepository,
+                    startupWorkbookRepository = StartupWorkbookRepository(app.applicationContext)
                 )
             }
         }
@@ -239,6 +257,7 @@ fun Idea2ImpactApp() {
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
     val unreadNotificationsCount by viewModel.unreadNotificationsCount.collectAsStateWithLifecycle()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
+    val authSessionState by viewModel.authSessionState.collectAsStateWithLifecycle()
     val showAuthModal by viewModel.showAuthModal.collectAsStateWithLifecycle()
     val authError by viewModel.authError.collectAsStateWithLifecycle()
     val isAuthBusy by viewModel.isAuthBusy.collectAsStateWithLifecycle()
@@ -766,16 +785,80 @@ fun Idea2ImpactApp() {
                     },
                     bottomBar = {
                         if (!useRail && showMainChrome && !isImeVisible) {
-                            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                                bottomTabs.forEach { tab ->
-                                    val selected = currentRouteName.startsWith(tab.qualifiedName)
-                                    NavigationBarItem(
-                                        selected = selected,
-                                        onClick = { navigateTopTab(tab) },
-                                        icon = { Icon(if (selected) tab.selectedIcon else tab.unselectedIcon, contentDescription = null) },
-                                        label = { Text(tab.label, maxLines = 1) },
-                                        modifier = Modifier.testTag(tab.testTag)
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                tonalElevation = 2.dp
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .windowInsetsPadding(NavigationBarDefaults.windowInsets)
+                                ) {
+                                    HorizontalDivider(
+                                        thickness = 0.5.dp,
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                                     )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(52.dp)
+                                            .padding(horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        bottomTabs.forEach { tab ->
+                                            val selected = currentRouteName.startsWith(tab.qualifiedName)
+                                            val activeColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                            val inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                            Column(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .heightIn(min = 48.dp)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .selectable(
+                                                        selected = selected,
+                                                        onClick = { navigateTopTab(tab) },
+                                                        role = Role.Tab
+                                                    )
+                                                    .padding(vertical = 2.dp, horizontal = 2.dp)
+                                                    .testTag(tab.testTag),
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.Center
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(48.dp)
+                                                        .height(24.dp)
+                                                        .clip(CircleShape)
+                                                        .background(
+                                                            if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                                            else Color.Transparent
+                                                        ),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                                        contentDescription = null,
+                                                        tint = if (selected) activeColor else inactiveColor,
+                                                        modifier = Modifier.size(19.dp)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(1.dp))
+                                                Text(
+                                                    text = tab.label,
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        fontSize = 10.sp,
+                                                        lineHeight = 11.sp,
+                                                        letterSpacing = (-0.1).sp,
+                                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
+                                                    ),
+                                                    color = if (selected) MaterialTheme.colorScheme.onSurface else inactiveColor
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1192,6 +1275,11 @@ fun Idea2ImpactApp() {
                                         StartupSoundPlayer.playTap(context)
                                         navController.navigate(AppRoute.Collaborations)
                                     },
+                                    authSessionState = authSessionState,
+                                    onRetryAuthSync = {
+                                        StartupSoundPlayer.playTap(context)
+                                        viewModel.retryUnifiedAuthSync()
+                                    },
                                     onSignOut = {
                                         StartupSoundPlayer.playTap(context)
                                         signOutWithCredentialClear(
@@ -1245,11 +1333,19 @@ fun Idea2ImpactApp() {
                                                 onDone()
                                             }
                                         },
-                                        onSubmitProposal = { type, amount, msg, contact, onDone ->
-                                            viewModel.submitProposal(detail.id, type, amount, msg, contact) {
-                                                StartupSoundPlayer.playSuccess(context)
-                                                onDone()
-                                            }
+                                        onSubmitProposal = { type, amount, msg, contact, onDone, onError ->
+                                            viewModel.submitProposal(
+                                                innovationId = detail.id,
+                                                type = type,
+                                                amount = amount,
+                                                message = msg,
+                                                contactInfo = contact,
+                                                onSuccess = {
+                                                    StartupSoundPlayer.playSuccess(context)
+                                                    onDone()
+                                                },
+                                                onError = onError
+                                            )
                                         },
                                         onSignNda = { name, org ->
                                             StartupSoundPlayer.playSuccess(context)

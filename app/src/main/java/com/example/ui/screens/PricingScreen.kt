@@ -72,7 +72,7 @@ fun PricingScreen(
         ),
         PricingTier(
             name = "COMPANY",
-            price = "$39/mo",
+            price = "$29/mo",
             features = listOf(
                 "Company profile",
                 "Advanced discovery",
@@ -83,7 +83,7 @@ fun PricingScreen(
         ),
         PricingTier(
             name = "INVESTOR PRO",
-            price = "$29/mo",
+            price = "$39/mo",
             features = listOf(
                 "Advanced opportunity discovery",
                 "Saved pipeline",

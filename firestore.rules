@@ -226,7 +226,7 @@ service cloud.firestore {
              (!('recipientName' in data) || data.recipientName == null || isBoundedString(data.recipientName, 0, 120)) &&
              isValidId(data.innovationId) &&
              isBoundedString(data.innovationTitle, 1, 160) &&
-             data.proposalType in ['Investment', 'Licensing', 'Co-founder', 'Acquisition', 'Collaboration', 'Mentorship'] &&
+             data.proposalType in ['Investment', 'Licensing', 'Co-founder', 'Co-Founder', 'Acquisition', 'Collaboration', 'Mentorship', 'Engineering', 'Distribution'] &&
              (!('amount' in data) || data.amount == null || isBoundedString(data.amount, 0, 120)) &&
              isBoundedString(data.message, 5, 2500) &&
              (!('contactInfo' in data) || data.contactInfo == null || isBoundedString(data.contactInfo, 0, 200)) &&
@@ -699,7 +699,8 @@ service cloud.firestore {
                        incoming().senderId == request.auth.uid &&
                        incoming().status == 'PENDING' && (
                          (incoming().innovationId != 'none' &&
-                          exists(/databases/$(database)/documents/innovations/$(incoming().innovationId))) ||
+                          (exists(/databases/$(database)/documents/innovations/$(incoming().innovationId)) ||
+                           incoming().recipientId != request.auth.uid)) ||
                          (incoming().innovationId == 'none' &&
                           incoming().recipientId != request.auth.uid &&
                           exists(/databases/$(database)/documents/talents/$(incoming().recipientId)))

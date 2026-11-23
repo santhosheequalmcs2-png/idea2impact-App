@@ -8,6 +8,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,17 +24,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Handshake
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +48,7 @@ import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -53,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -60,9 +67,11 @@ import androidx.compose.ui.unit.dp
 import com.example.data.local.IdeaPortfolioEntity
 import com.example.data.local.InvestorPortfolioEntity
 import com.example.data.local.SavedProfileEntity
+import com.example.data.model.AuthSyncStatus
 import com.example.data.model.AuthUser
 import com.example.data.model.BackendInnovation
 import com.example.data.model.DashboardStats
+import com.example.data.model.UnifiedAuthSessionState
 import com.example.data.model.Proposal
 import com.example.data.model.UiState
 import com.example.ui.components.BackendInnovationCard
@@ -124,6 +133,8 @@ fun DashboardScreen(
     pendingInvitesCount: Int = 0,
     onOpenMessages: () -> Unit = {},
     onOpenCollaborations: () -> Unit = {},
+    authSessionState: UnifiedAuthSessionState = UnifiedAuthSessionState(),
+    onRetryAuthSync: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -232,6 +243,18 @@ fun DashboardScreen(
                         Text("Login")
                     }
                 }
+            }
+        }
+
+        if (currentUser != null) {
+            item {
+                UnifiedIdentitySyncCard(
+                    sessionState = authSessionState,
+                    onRetrySync = {
+                        haptics.tap()
+                        onRetryAuthSync()
+                    }
+                )
             }
         }
 
@@ -784,4 +807,124 @@ private fun FirestoreProposalCard(
         }
     }
 }
+
+@Composable
+private fun UnifiedIdentitySyncCard(
+    sessionState: UnifiedAuthSessionState,
+    onRetrySync: () -> Unit
+) {
+    val isDegraded = sessionState.syncStatus == AuthSyncStatus.BACKEND_DEGRADED ||
+        sessionState.syncStatus == AuthSyncStatus.FIREBASE_DEGRADED
+    val isSyncing = sessionState.syncStatus == AuthSyncStatus.SYNCING
+    val accentColor = when (sessionState.syncStatus) {
+        AuthSyncStatus.SYNCED -> EmeraldSuccess
+        AuthSyncStatus.SYNCING -> MaterialTheme.colorScheme.primary
+        AuthSyncStatus.BACKEND_DEGRADED, AuthSyncStatus.FIREBASE_DEGRADED -> GoldAmber
+        AuthSyncStatus.SIGNED_OUT -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val statusTitle = when (sessionState.syncStatus) {
+        AuthSyncStatus.SYNCED -> "Cloud & Marketplace Synced"
+        AuthSyncStatus.SYNCING -> sessionState.statusNotice ?: "Syncing unified account..."
+        AuthSyncStatus.BACKEND_DEGRADED -> sessionState.statusNotice ?: "Cloud workspace active · Marketplace sync pending"
+        AuthSyncStatus.FIREBASE_DEGRADED -> sessionState.statusNotice ?: "Marketplace session active · Cloud sync pending"
+        AuthSyncStatus.SIGNED_OUT -> "Not synced"
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_unified_auth_card")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (isSyncing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = accentColor
+                )
+            } else {
+                Icon(
+                    imageVector = if (sessionState.syncStatus == AuthSyncStatus.SYNCED) {
+                        Icons.Filled.CloudDone
+                    } else {
+                        Icons.Filled.Sync
+                    },
+                    contentDescription = statusTitle,
+                    tint = accentColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = statusTitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (sessionState.linkedProviders.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        sessionState.linkedProviders.forEach { provider ->
+                            val label = when (provider.lowercase()) {
+                                "google" -> "Google Linked"
+                                "password" -> "Email & Password"
+                                else -> provider.replaceFirstChar { it.uppercase() }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(accentColor)
+                                    )
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (isDegraded) {
+                TextButton(
+                    onClick = onRetrySync,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("dashboard_retry_auth_sync")
+                ) {
+                    Text(
+                        text = "Sync Now",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
 

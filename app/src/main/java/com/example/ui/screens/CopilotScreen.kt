@@ -116,33 +116,47 @@ import kotlinx.coroutines.withContext
 
 private data class QuickActionPrompt(
     val chipLabel: String,
-    val prompt: String
+    val prompt: String,
+    val prefillWhenNoFocus: String? = null,
+    val testTagSuffix: String = ""
 )
 
 private val QUICK_ACTIONS = listOf(
     QuickActionPrompt(
-        "🛡️ Patentability & Prior-Art Scan",
-        "Run a comprehensive patentability & prior-art scan for this innovation. Identify potential USPTO/PCT claim pillars and freedom-to-operate risks."
+        chipLabel = "📚 Evaluate vs 1,600-Idea Workbook",
+        prompt = "Evaluate this startup idea against the 1,600-concept India Startup Ideas reference workbook. Summarize it, cite the closest workbook entries, separate evidence from assumptions, suggest tailored differentiation directions with low-cost tests, and give up to 3 next steps.",
+        prefillWhenNoFocus = "Evaluate my startup idea against the workbook:\n- Intended customer: \n- Problem: \n- Proposed solution: \n- Industry & location/market: \n- Business model: ",
+        testTagSuffix = "workbook_evaluate"
     ),
     QuickActionPrompt(
-        "📊 Market Sizing (TAM/SAM/SOM)",
-        "Calculate a bottom-up TAM, SAM, and SOM market sizing breakdown with unit economics and GTM beachhead wedges."
+        chipLabel = "🛡️ Patentability & Prior-Art Scan",
+        prompt = "Run a comprehensive patentability & prior-art scan for this innovation. Identify potential USPTO/PCT claim pillars and freedom-to-operate risks.",
+        testTagSuffix = "patent_scan"
     ),
     QuickActionPrompt(
-        "📑 1-Min Investor Pitch Deck",
-        "Draft a crisp 1-minute, 5-slide investor pitch deck covering Problem, Breakthrough Solution, Market Size, IP Moat, and Capital Ask."
+        chipLabel = "📊 Market Sizing (TAM/SAM/SOM)",
+        prompt = "Calculate a bottom-up TAM, SAM, and SOM market sizing breakdown with unit economics and GTM beachhead wedges.",
+        testTagSuffix = "market_sizing"
     ),
     QuickActionPrompt(
-        "🛠️ Prototyping & Tech Blueprint",
-        "Outline a rapid prototyping & engineering architecture blueprint with hardware BOM / firmware stack and MVP milestones."
+        chipLabel = "📑 1-Min Investor Pitch Deck",
+        prompt = "Draft a crisp 1-minute, 5-slide investor pitch deck covering Problem, Breakthrough Solution, Market Size, IP Moat, and Capital Ask.",
+        testTagSuffix = "pitch_deck"
     ),
     QuickActionPrompt(
-        "⚖️ IP Protection & NDA Strategy",
-        "Recommend a layered IP protection & Mutual NDA strategy prior to disclosing CAD schematics to suppliers or angel investors."
+        chipLabel = "🛠️ Prototyping & Tech Blueprint",
+        prompt = "Outline a rapid prototyping & engineering architecture blueprint with hardware BOM / firmware stack and MVP milestones.",
+        testTagSuffix = "prototyping"
     ),
     QuickActionPrompt(
-        "🤝 Co-Founder & Talent Equity",
-        "Design a fair co-founder & founding engineer equity vesting split (4-year cliff, milestone tranches) for a deep-tech startup."
+        chipLabel = "⚖️ IP Protection & NDA Strategy",
+        prompt = "Recommend a layered IP protection & Mutual NDA strategy prior to disclosing CAD schematics to suppliers or angel investors.",
+        testTagSuffix = "ip_nda"
+    ),
+    QuickActionPrompt(
+        chipLabel = "🤝 Co-Founder & Talent Equity",
+        prompt = "Design a fair co-founder & founding engineer equity vesting split (4-year cliff, milestone tranches) for a deep-tech startup.",
+        testTagSuffix = "equity"
     )
 )
 
@@ -267,36 +281,7 @@ fun CopilotScreen(
                                 AiNetworkHealthStatus.REQUESTS_BLOCKED,
                                 AiNetworkHealthStatus.APP_CHECK_ISSUE
                             )
-                            if (isLoading && activeStatusLabel.isNotBlank()) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(9.dp),
-                                    strokeWidth = 1.5.dp,
-                                    color = if (aiStatus.phase == AiRequestPhase.STREAMING) {
-                                        EmeraldSuccess
-                                    } else {
-                                        MaterialTheme.colorScheme.primary
-                                    }
-                                )
-                                Text(
-                                    text = if (effectiveDiagnosticState.isChecking) {
-                                        NetworkDiagnosticManager.LABEL_CHECKING_CONNECTION
-                                    } else if (effectiveDiagnosticState.health == AiNetworkHealthStatus.NO_INTERNET) {
-                                        NetworkDiagnosticManager.LABEL_NO_INTERNET
-                                    } else {
-                                        activeStatusLabel
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (aiStatus.phase == AiRequestPhase.STREAMING) {
-                                        EmeraldSuccess
-                                    } else {
-                                        MaterialTheme.colorScheme.primary
-                                    },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            } else if (effectiveDiagnosticState.isChecking) {
+                            if (effectiveDiagnosticState.isChecking) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(9.dp),
                                     strokeWidth = 1.5.dp,
@@ -600,15 +585,27 @@ fun CopilotScreen(
                                         actionLabel = action.chipLabel,
                                         surface = "full_screen"
                                     )
-                                    onSendPrompt(action.prompt, attachedBitmap, "quick_action")
-                                    attachedBitmap = null
+                                    if (focusedInnovation == null && action.prefillWhenNoFocus != null) {
+                                        input = action.prefillWhenNoFocus
+                                    } else {
+                                        onSendPrompt(action.prompt, attachedBitmap, "quick_action")
+                                        attachedBitmap = null
+                                    }
                                 }
                             },
                             enabled = !isLoading,
                             shape = RoundedCornerShape(10.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)),
-                            modifier = Modifier.heightIn(min = 30.dp)
+                            modifier = Modifier
+                                .heightIn(min = 30.dp)
+                                .let { base ->
+                                    if (action.testTagSuffix.isNotBlank()) {
+                                        base.testTag("copilot_quick_${action.testTagSuffix}")
+                                    } else {
+                                        base
+                                    }
+                                }
                         ) {
                             Box(
                                 contentAlignment = Alignment.Center,
@@ -671,14 +668,21 @@ fun CopilotScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    val showHeaderStreamingStatus = isCurrentlyStreaming && msg.content.isNotBlank()
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = if (showHeaderStreamingStatus) {
+                                            Modifier.testTag("copilot_status_indicator")
+                                        } else {
+                                            Modifier
+                                        }
                                     ) {
-                                        if (isCurrentlyStreaming) {
+                                        if (showHeaderStreamingStatus) {
                                             CircularProgressIndicator(
                                                 modifier = Modifier.size(13.dp),
-                                                strokeWidth = 2.dp
+                                                strokeWidth = 2.dp,
+                                                color = EmeraldSuccess
                                             )
                                         } else {
                                             Icon(
@@ -689,13 +693,17 @@ fun CopilotScreen(
                                             )
                                         }
                                         Text(
-                                            text = if (isCurrentlyStreaming) {
-                                                "$chipModelName · ${activeStatusLabel.ifBlank { "Thinking..." }}"
+                                            text = if (showHeaderStreamingStatus) {
+                                                "$chipModelName · ${activeStatusLabel.ifBlank { "Streaming response..." }}"
                                             } else {
                                                 msg.respondingModelLabel ?: chipModelName
                                             },
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = if (msg.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                            color = when {
+                                                msg.isError -> MaterialTheme.colorScheme.error
+                                                showHeaderStreamingStatus -> EmeraldSuccess
+                                                else -> MaterialTheme.colorScheme.primary
+                                            }
                                         )
                                     }
 
@@ -767,7 +775,9 @@ fun CopilotScreen(
                                 }
                                 Column(
                                     verticalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.padding(vertical = 2.dp)
+                                    modifier = Modifier
+                                        .padding(vertical = 2.dp)
+                                        .testTag("copilot_status_indicator")
                                 ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
@@ -1015,57 +1025,6 @@ fun CopilotScreen(
                                     )
                                 }
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        AnimatedVisibility(
-            visible = isLoading && activeStatusLabel.isNotBlank(),
-            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
-            exit = fadeOut(tween(140)) + shrinkVertically(tween(140))
-        ) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("copilot_status_indicator")
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        strokeWidth = 2.dp,
-                        color = if (aiStatus.phase == AiRequestPhase.STREAMING) {
-                            EmeraldSuccess
-                        } else {
-                            MaterialTheme.colorScheme.primary
-                        }
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = activeStatusLabel,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (activeStatusHint.isNotBlank()) {
-                            Text(
-                                text = activeStatusHint,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
                         }
                     }
                 }

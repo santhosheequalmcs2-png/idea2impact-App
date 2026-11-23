@@ -17,6 +17,12 @@ interface Idea2ImpactApiService {
     @POST("auth/register")
     suspend fun register(@Body body: RequestBody): Response<ResponseBody>
 
+    @POST("auth/firebase-exchange")
+    suspend fun exchangeFirebaseToken(@Body body: RequestBody): Response<ResponseBody>
+
+    @POST("auth/firebase-custom-token")
+    suspend fun requestFirebaseCustomToken(): Response<ResponseBody>
+
     @GET("auth/me")
     suspend fun getMe(): Response<ResponseBody>
 

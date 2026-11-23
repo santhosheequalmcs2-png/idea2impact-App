@@ -406,7 +406,9 @@ fun MovableAiPopup(
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1
                             )
-                            if (isLoading && popupStatusLabel.isNotBlank()) {
+                            val hasBlankThinkingBubble = isLoading &&
+                                messages.lastOrNull()?.let { it.isAssistant && it.content.isBlank() } == true
+                            if (isLoading && popupStatusLabel.isNotBlank() && !hasBlankThinkingBubble) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -598,7 +600,10 @@ fun MovableAiPopup(
                                                     NetworkDiagnosticManager.LABEL_NO_INTERNET
                                                 else -> aiStatus.label.ifBlank { "Thinking..." }
                                             }
-                                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Column(
+                                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                                                modifier = Modifier.testTag("popup_status_indicator")
+                                            ) {
                                                 Row(
                                                     verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.spacedBy(8.dp)

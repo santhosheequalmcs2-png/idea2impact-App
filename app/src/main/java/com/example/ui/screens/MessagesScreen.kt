@@ -11,6 +11,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +38,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
@@ -80,6 +83,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -98,6 +102,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -106,6 +111,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -489,22 +495,73 @@ private fun ConversationListPane(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                singleLine = true,
-                placeholder = { Text("Search conversations & roles...") },
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                trailingIcon = {
+            val inboxSearchInteractionSource = remember { MutableInteractionSource() }
+            val inboxSearchFocused by inboxSearchInteractionSource.collectIsFocusedAsState()
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                border = BorderStroke(
+                    width = if (inboxSearchFocused) 1.5.dp else 1.dp,
+                    color = if (inboxSearchFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (searchQuery.isEmpty()) {
+                            Text(
+                                text = "Search conversations & roles...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            interactionSource = inboxSearchInteractionSource,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("messages_search_input")
+                        )
+                    }
                     if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                        IconButton(
+                            onClick = { searchQuery = "" },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Clear search",
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
                     }
-                },
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth().testTag("messages_search_input")
-            )
+                }
+            }
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(ConversationFilter.entries) { tab ->
@@ -1035,21 +1092,70 @@ private fun ChatWindowPane(
         )
 
         AnimatedVisibility(visible = searchInChatOpen) {
-            OutlinedTextField(
-                value = chatSearchQuery,
-                onValueChange = { chatSearchQuery = it },
-                placeholder = { Text("Search messages...") },
-                singleLine = true,
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                trailingIcon = {
-                    IconButton(onClick = { chatSearchQuery = ""; searchInChatOpen = false }) {
-                        Icon(Icons.Filled.Close, contentDescription = "Close search")
-                    }
-                },
+            val chatSearchInteractionSource = remember { MutableInteractionSource() }
+            val chatSearchFocused by chatSearchInteractionSource.collectIsFocusedAsState()
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                border = BorderStroke(
+                    width = if (chatSearchFocused) 1.5.dp else 1.dp,
+                    color = if (chatSearchFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            )
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .height(38.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (chatSearchQuery.isEmpty()) {
+                            Text(
+                                text = "Search messages...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = chatSearchQuery,
+                            onValueChange = { chatSearchQuery = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            interactionSource = chatSearchInteractionSource,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    IconButton(
+                        onClick = { chatSearchQuery = ""; searchInChatOpen = false },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Close search",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
         }
 
         if (!conv.innovationTitle.isNullOrBlank() && conv.innovationId != null) {
@@ -1196,13 +1302,17 @@ private fun ChatWindowPane(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Box {
-                    IconButton(onClick = { showAttachMenu = true }, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Filled.AttachFile, contentDescription = "Attach file or innovation")
+                    IconButton(onClick = { showAttachMenu = true }, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.Filled.AttachFile,
+                            contentDescription = "Attach file or innovation",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                     DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
                         DropdownMenuItem(
@@ -1232,22 +1342,59 @@ private fun ChatWindowPane(
                     }
                 }
 
-                IconButton(onClick = { showEmojiBar = !showEmojiBar }, modifier = Modifier.size(44.dp)) {
+                IconButton(onClick = { showEmojiBar = !showEmojiBar }, modifier = Modifier.size(48.dp)) {
                     Icon(
                         Icons.Filled.EmojiEmotions,
                         contentDescription = "Emoji picker",
-                        tint = if (showEmojiBar) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (showEmojiBar) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                OutlinedTextField(
-                    value = composerText,
-                    onValueChange = { composerText = it },
-                    placeholder = { Text("Message ${title.take(18)}…") },
-                    maxLines = 4,
-                    shape = RoundedCornerShape(22.dp),
-                    modifier = Modifier.weight(1f).testTag("chat_message_input")
-                )
+                val composerInteractionSource = remember { MutableInteractionSource() }
+                val composerFocused by composerInteractionSource.collectIsFocusedAsState()
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                    border = BorderStroke(
+                        width = if (composerFocused) 1.5.dp else 1.dp,
+                        color = if (composerFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.65f)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 36.dp, max = 88.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (composerText.isEmpty()) {
+                            Text(
+                                text = "Message ${title.take(18)}…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = composerText,
+                            onValueChange = { composerText = it },
+                            singleLine = false,
+                            maxLines = 4,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            interactionSource = composerInteractionSource,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("chat_message_input")
+                        )
+                    }
+                }
 
                 IconButton(
                     onClick = {

@@ -104,7 +104,14 @@ fun DetailScreen(
     onToggleIdeaPortfolio: () -> Unit = {},
     onToggleInvestorPortfolio: () -> Unit = {},
     onPostComment: (text: String, onDone: () -> Unit) -> Unit,
-    onSubmitProposal: (type: String, amount: String, message: String, contactInfo: String, onDone: () -> Unit) -> Unit,
+    onSubmitProposal: (
+        type: String,
+        amount: String,
+        message: String,
+        contactInfo: String,
+        onDone: () -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit,
     onSignNda: (signerName: String, signerOrg: String) -> Unit,
     onGeneratePitchDeck: () -> Unit,
     onDismissPitchDeck: () -> Unit,
@@ -114,6 +121,7 @@ fun DetailScreen(
 ) {
     var commentText by remember { mutableStateOf("") }
     var showProposalModal by remember { mutableStateOf(false) }
+    var proposalError by remember { mutableStateOf<String?>(null) }
     var showNdaModal by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val haptics = LocalHapticFeedbackManager.current
@@ -653,12 +661,28 @@ fun DetailScreen(
         CollaborationProposalModal(
             innovationTitle = innovation.title,
             isBusy = isBusy,
+            errorMessage = proposalError,
+            onClearError = { proposalError = null },
             onSubmit = { type, amount, msg, contact ->
-                onSubmitProposal(type, amount, msg, contact) {
-                    showProposalModal = false
-                }
+                proposalError = null
+                onSubmitProposal(
+                    type,
+                    amount,
+                    msg,
+                    contact,
+                    {
+                        proposalError = null
+                        showProposalModal = false
+                    },
+                    { err ->
+                        proposalError = err
+                    }
+                )
             },
-            onDismiss = { showProposalModal = false }
+            onDismiss = {
+                proposalError = null
+                showProposalModal = false
+            }
         )
     }
 

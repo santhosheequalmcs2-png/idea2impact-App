@@ -61,6 +61,8 @@ import com.example.util.LocalHapticFeedbackManager
 fun CollaborationProposalModal(
     innovationTitle: String,
     isBusy: Boolean,
+    errorMessage: String? = null,
+    onClearError: () -> Unit = {},
     onSubmit: (type: String, amount: String, message: String, contactInfo: String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -162,9 +164,15 @@ fun CollaborationProposalModal(
 
             OutlinedTextField(
                 value = message,
-                onValueChange = { message = it },
-                label = { Text("Proposal Message") },
+                onValueChange = {
+                    message = it
+                    onClearError()
+                },
+                label = { Text("Proposal Message *") },
                 placeholder = { Text("Share your thesis, relevant engineering capabilities, or strategic value...") },
+                supportingText = if (message.isNotEmpty() && message.trim().length < 5) {
+                    { Text("Please enter at least 5 characters.") }
+                } else null,
                 minLines = 3,
                 maxLines = 6,
                 modifier = Modifier.fillMaxWidth().testTag("proposal_message_input")
@@ -172,14 +180,33 @@ fun CollaborationProposalModal(
 
             OutlinedTextField(
                 value = contactInfo,
-                onValueChange = { contactInfo = it },
+                onValueChange = {
+                    contactInfo = it
+                    onClearError()
+                },
                 label = { Text("Contact Info (Email / LinkedIn / Phone)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().testTag("proposal_contact_input")
             )
 
+            if (!errorMessage.isNullOrBlank()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("proposal_error_banner")
+                ) {
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
             Button(
                 onClick = {
+                    onClearError()
                     haptics.success()
                     onSubmit(selectedType, amount, message, contactInfo)
                 },

@@ -47,6 +47,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
+import com.example.data.model.AuthExchangeResult
+import kotlinx.coroutines.runBlocking
+import okhttp3.Authenticator
+import okhttp3.Request
+import okhttp3.Route
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
@@ -59,13 +64,16 @@ import kotlin.coroutines.cancellation.CancellationException
 class BackendRepository(
     private val tokenManager: TokenManager,
     private val innovationDao: InnovationDao? = null,
-    private val searchHistoryDao: SearchHistoryDao? = null
+    private val searchHistoryDao: SearchHistoryDao? = null,
+    private val baseUrl: String = BASE_URL,
+    private val firebaseIdTokenProvider: (suspend (forceRefresh: Boolean) -> String?)? = null
 ) {
     private val json get() = sharedJson
 
     @Volatile
     private var backendAwake = false
     private val warmUpMutex = Mutex()
+    private val tokenRefreshLock = Any()
 
     private val api: Idea2ImpactApiService by lazy {
         val logging = HttpLoggingInterceptor { msg ->
@@ -103,15 +111,88 @@ class BackendRepository(
                 }
                 chain.proceed(reqBuilder.build())
             }
+            .authenticator(createTokenRefreshAuthenticator())
             .addInterceptor(retryInterceptor)
             .addInterceptor(logging)
             .build()
 
         Retrofit.Builder()
-            .baseUrl(BASE_URL)
+            .baseUrl(baseUrl)
             .client(client)
             .build()
             .create(Idea2ImpactApiService::class.java)
+    }
+
+    private val exchangeClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(35, TimeUnit.SECONDS)
+            .writeTimeout(25, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun createTokenRefreshAuthenticator(): Authenticator = Authenticator { _: Route?, response: okhttp3.Response ->
+        val provider = firebaseIdTokenProvider ?: return@Authenticator null
+        val path = response.request.url.encodedPath
+        // Never intercept auth entry endpoints or repeat a previously retried 401
+        if (path.endsWith("/auth/login") ||
+            path.endsWith("/auth/register") ||
+            path.endsWith("/auth/firebase-exchange") ||
+            response.request.header(HEADER_AUTH_RETRY) != null
+        ) {
+            return@Authenticator null
+        }
+
+        val failedToken = response.request.header("Authorization")?.removePrefix("Bearer ")?.trim()
+        synchronized(tokenRefreshLock) {
+            val currentToken = tokenManager.getToken()
+            // Another in-flight request already refreshed the JWT — reuse it immediately
+            if (!currentToken.isNullOrBlank() && currentToken != failedToken) {
+                return@Authenticator response.request.newBuilder()
+                    .header("Authorization", "Bearer $currentToken")
+                    .header(HEADER_AUTH_RETRY, "1")
+                    .build()
+            }
+
+            val refreshedJwt = runCatching {
+                val idToken = runBlocking { provider(true) }?.takeIf { it.isNotBlank() }
+                    ?: return@runCatching null
+                val payload = buildJsonObject {
+                    put("idToken", idToken)
+                }.toString()
+                val exchangeUrl = baseUrl.trimEnd('/') + "/auth/firebase-exchange"
+                val req = Request.Builder()
+                    .url(exchangeUrl)
+                    .header("Accept", "application/json")
+                    .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+                exchangeClient.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) return@use null
+                    val raw = res.body?.string().orEmpty()
+                    if (raw.isBlank()) return@use null
+                    val obj = json.parseToJsonElement(raw).asObjOrEmpty()
+                    val newToken = obj.str("token")
+                        ?: obj.obj("data")?.str("token")
+                        ?: obj.str("accessToken")
+                    if (!newToken.isNullOrBlank()) {
+                        tokenManager.saveToken(newToken)
+                    }
+                    newToken
+                }
+            }.onFailure { e ->
+                Log.w(TAG, "Silent 401 JWT refresh failed: ${SanaPromptEngine.redactSensitiveInfo(e.message.orEmpty())}")
+            }.getOrNull()
+
+            if (refreshedJwt.isNullOrBlank()) {
+                return@Authenticator null
+            }
+
+            response.request.newBuilder()
+                .header("Authorization", "Bearer $refreshedJwt")
+                .header(HEADER_AUTH_RETRY, "1")
+                .build()
+        }
     }
 
     private suspend fun <T> executeWithColdStartRetry(
@@ -203,7 +284,10 @@ class BackendRepository(
 
     // --- Auth ---
 
-    suspend fun login(email: String, password: String): AuthUser = withContext(Dispatchers.IO) {
+    suspend fun login(email: String, password: String): AuthUser =
+        loginWithExchange(email, password).user
+
+    suspend fun loginWithExchange(email: String, password: String): AuthExchangeResult = withContext(Dispatchers.IO) {
         val payload = buildJsonObject {
             put("email", email.trim())
             put("password", password)
@@ -211,18 +295,13 @@ class BackendRepository(
         val root = executeWithColdStartRetry(retryOnTimeout = true) {
             parseRoot(api.login(payload))
         }
-        val obj = root.asObjOrEmpty()
-        val token = obj.str("token")
-            ?: obj.obj("data")?.str("token")
-            ?: obj.str("accessToken")
-        if (!token.isNullOrBlank()) {
-            tokenManager.saveToken(token)
-        }
-        val userObj = obj.obj("user") ?: obj.obj("data")?.obj("user") ?: obj.obj("data") ?: obj
-        parseAuthUser(userObj)
+        parseAuthExchangeResult(root)
     }
 
-    suspend fun register(name: String, email: String, password: String): AuthUser = withContext(Dispatchers.IO) {
+    suspend fun register(name: String, email: String, password: String): AuthUser =
+        registerWithExchange(name, email, password).user
+
+    suspend fun registerWithExchange(name: String, email: String, password: String): AuthExchangeResult = withContext(Dispatchers.IO) {
         val payload = buildJsonObject {
             put("name", name.trim())
             put("email", email.trim())
@@ -231,6 +310,32 @@ class BackendRepository(
         val root = executeWithColdStartRetry(retryOnTimeout = false) {
             parseRoot(api.register(payload))
         }
+        parseAuthExchangeResult(root)
+    }
+
+    suspend fun exchangeFirebaseIdToken(idToken: String): AuthExchangeResult = withContext(Dispatchers.IO) {
+        val payload = buildJsonObject {
+            put("idToken", idToken.trim())
+        }.toRequestBody()
+        val root = executeWithColdStartRetry(retryOnTimeout = true) {
+            parseRoot(api.exchangeFirebaseToken(payload))
+        }
+        parseAuthExchangeResult(root)
+    }
+
+    suspend fun requestFirebaseCustomToken(): String? = withContext(Dispatchers.IO) {
+        if (tokenManager.getToken().isNullOrBlank()) return@withContext null
+        val root = executeWithColdStartRetry(retryOnTimeout = true) {
+            parseRoot(api.requestFirebaseCustomToken())
+        }
+        val obj = root.asObjOrEmpty()
+        obj.str("firebaseCustomToken")
+            ?: obj.str("customToken")
+            ?: obj.obj("data")?.str("firebaseCustomToken")
+            ?: obj.obj("data")?.str("customToken")
+    }
+
+    private fun parseAuthExchangeResult(root: JsonElement): AuthExchangeResult {
         val obj = root.asObjOrEmpty()
         val token = obj.str("token")
             ?: obj.obj("data")?.str("token")
@@ -238,8 +343,22 @@ class BackendRepository(
         if (!token.isNullOrBlank()) {
             tokenManager.saveToken(token)
         }
+        val firebaseCustomToken = obj.str("firebaseCustomToken")
+            ?: obj.str("customToken")
+            ?: obj.obj("data")?.str("firebaseCustomToken")
+            ?: obj.obj("data")?.str("customToken")
+        val accountLinked = obj.boolVal("accountLinked")
+            ?: obj.boolVal("linked")
+            ?: obj.obj("data")?.boolVal("accountLinked")
+            ?: obj.obj("data")?.boolVal("linked")
+            ?: false
         val userObj = obj.obj("user") ?: obj.obj("data")?.obj("user") ?: obj.obj("data") ?: obj
-        parseAuthUser(userObj)
+        return AuthExchangeResult(
+            user = parseAuthUser(userObj),
+            token = token,
+            firebaseCustomToken = firebaseCustomToken,
+            accountLinked = accountLinked
+        )
     }
 
     suspend fun fetchCurrentUser(): AuthUser? = withContext(Dispatchers.IO) {
@@ -656,6 +775,12 @@ class BackendRepository(
         val location = obj.str("location") ?: "Global"
         val skills = obj.arr("skills")?.mapNotNull { it.asStr() }.orEmpty()
         val verified = obj.boolVal("verified") ?: true
+        val firebaseUid = obj.str("firebaseUid") ?: obj.str("firebase_uid")
+        val authProviders = (obj.arr("authProviders") ?: obj.arr("auth_providers") ?: obj.arr("providers"))
+            ?.mapNotNull { it.asStr()?.lowercase() }
+            ?.distinct()
+            .orEmpty()
+        val emailVerified = obj.boolVal("emailVerified") ?: obj.boolVal("email_verified") ?: verified
         return AuthUser(
             id = id,
             name = name,
@@ -666,7 +791,10 @@ class BackendRepository(
             avatarUrl = avatarUrl,
             location = location,
             skills = skills,
-            verified = verified
+            verified = verified,
+            firebaseUid = firebaseUid,
+            authProviders = authProviders,
+            emailVerified = emailVerified
         )
     }
 
@@ -841,8 +969,10 @@ class BackendRepository(
     internal companion object {
         const val TAG = "BackendRepository"
         const val BASE_URL = "https://idea2impact-g8fe.onrender.com/api/"
+        const val HEADER_AUTH_RETRY = "X-Auth-Retry"
         const val MAX_RECENT_SEARCHES = 10
         val RETRYABLE_HTTP_CODES = setOf(502, 503, 504)
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val sharedJson = Json {
             ignoreUnknownKeys = true
             isLenient = true

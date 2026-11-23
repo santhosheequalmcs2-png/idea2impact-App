@@ -10,7 +10,33 @@ data class AuthUser(
     val avatarUrl: String? = null,
     val location: String = "Global",
     val skills: List<String> = emptyList(),
-    val verified: Boolean = true
+    val verified: Boolean = true,
+    val firebaseUid: String? = null,
+    val authProviders: List<String> = emptyList(),
+    val emailVerified: Boolean = false
+)
+
+enum class AuthSyncStatus {
+    SIGNED_OUT,
+    SYNCING,
+    SYNCED,
+    BACKEND_DEGRADED,
+    FIREBASE_DEGRADED
+}
+
+data class AuthExchangeResult(
+    val user: AuthUser,
+    val token: String? = null,
+    val firebaseCustomToken: String? = null,
+    val accountLinked: Boolean = false
+)
+
+data class UnifiedAuthSessionState(
+    val syncStatus: AuthSyncStatus = AuthSyncStatus.SIGNED_OUT,
+    val isFirebaseSignedIn: Boolean = false,
+    val isBackendJwtActive: Boolean = false,
+    val linkedProviders: List<String> = emptyList(),
+    val statusNotice: String? = null
 )
 
 data class CategoryItem(
